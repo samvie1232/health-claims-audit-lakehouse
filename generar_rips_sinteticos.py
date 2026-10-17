@@ -24,7 +24,7 @@ Verifica nombres de campos y valores permitidos contra el anexo técnico oficial
 antes de presentarlo como "100 % conforme".
 
 Uso:
-    python generar_rips_sinteticos.py                      # 6 meses, escala 1
+    python generar_rips_sinteticos.py                      # 6 meses cerrados, escala 1
     python generar_rips_sinteticos.py --meses 12 --escala 20 --tasa-anomalia 0.04
 """
 
@@ -368,7 +368,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--salida", default="data", help="carpeta de salida (por defecto ./data)")
     ap.add_argument("--meses", type=int, default=6, help="meses a generar desde --inicio")
-    ap.add_argument("--inicio", default="2026-01", help="primer mes AAAA-MM")
+    ap.add_argument("--inicio", default=None,
+                    help="primer mes AAAA-MM (por defecto: el necesario para terminar en el último mes cerrado)")
     ap.add_argument("--escala", type=float, default=1.0, help="multiplicador de volumen")
     ap.add_argument("--tasa-anomalia", type=float, default=0.03, help="proporción aprox. de servicios anómalos")
     ap.add_argument("--semilla", type=int, default=2275)
@@ -376,7 +377,13 @@ def main() -> None:
 
     rng = random.Random(args.semilla)
     salida = Path(args.salida)
-    anio0, mes0 = map(int, args.inicio.split("-"))
+    if args.inicio:
+        anio0, mes0 = map(int, args.inicio.split("-"))
+    else:
+        # datos históricos: el último mes generado es el mes anterior al actual
+        actual = dt.date.today()
+        indice = actual.year * 12 + (actual.month - 1) - args.meses
+        anio0, mes0 = indice // 12, indice % 12 + 1
     hoy = dt.date(anio0, mes0, 1)
 
     nota = construir_nota_tecnica(rng)
