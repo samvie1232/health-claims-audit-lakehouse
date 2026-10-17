@@ -218,3 +218,6 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Datos generados localmente (se regeneran con generar_rips_sinteticos.py)
+data/
