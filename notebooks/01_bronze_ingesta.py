@@ -79,6 +79,7 @@ referencias = {
     "ref/catalogo_cie10.csv": "bronze_ref_cie10",
     "ref/catalogo_medicamentos.csv": "bronze_ref_medicamentos",
     "labels/anomalias_sembradas.csv": "eval_anomalias_sembradas",
+    "labels/anomalias_prestador_mes.csv": "eval_anomalias_prestador_mes",
 }
 for archivo, tabla in referencias.items():
     cargar_csv(f"{LANDING}/{archivo}", tabla)
