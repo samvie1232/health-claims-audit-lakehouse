@@ -40,7 +40,31 @@ display(spark.sql(f"SHOW VOLUMES IN {CATALOG}.{SCHEMA}"))
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 2. Generar los datos sintéticos en el volumen
+# MAGIC ## 2. Limpiar una generación anterior
+# MAGIC
+# MAGIC Regenerar con otros parámetros exige empezar de cero: se borran los archivos del volumen,
+# MAGIC los checkpoints de Auto Loader y las tablas del esquema. Si no, Bronze mezclaría datos viejos y nuevos.
+
+# COMMAND ----------
+
+for tabla in spark.sql(f"SHOW TABLES IN {CATALOG}.{SCHEMA}").collect():
+    if not tabla.isTemporary:
+        spark.sql(f"DROP TABLE IF EXISTS {CATALOG}.{SCHEMA}.{tabla.tableName}")
+        print(f"Tabla eliminada: {tabla.tableName}")
+
+for ruta in [f"{LANDING}/raw", f"{LANDING}/ref", f"{LANDING}/labels", f"/Volumes/{CATALOG}/{SCHEMA}/checkpoints/bronze_rips"]:
+    try:
+        dbutils.fs.rm(ruta, recurse=True)
+        print(f"Carpeta eliminada: {ruta}")
+    except Exception:
+        pass  # no existía
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 3. Generar los datos sintéticos en el volumen
+# MAGIC
+# MAGIC Los meses generados terminan en el último mes cerrado: no hay fechas de atención en el futuro.
 
 # COMMAND ----------
 
@@ -62,7 +86,7 @@ resultado.check_returncode()
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 3. Verificación rápida
+# MAGIC ## 4. Verificación rápida
 
 # COMMAND ----------
 
