@@ -6,6 +6,8 @@ Pipeline end-to-end que audita la facturación de prestadores de salud (RIPS en 
 
 ## Resultados (12 meses: oct 2025 – sep 2026)
 
+![Tablero de auditoría en Databricks AI/BI](docs/tablero.png)
+
 | Métrica | Valor |
 | --- | --- |
 | Facturas RIPS procesadas | 10.101 |
@@ -99,6 +101,6 @@ Databricks Free Edition · PySpark · Delta Lake · Unity Catalog · Auto Loader
 - [x] Silver: aplanado, calidad y valorización contra NT
 - [x] Gold: métricas por prestador, ejecución PGP y alertas de patrón
 - [x] Evaluación de reglas y alertas contra etiquetas
-- [ ] Tablero
+- [x] Tablero en Databricks AI/BI (`dashboards/consultas_tablero.sql`)
 - [ ] Orquestación con Lakeflow Jobs
 - [ ] CI/CD con Automation Bundles y GitHub Actions
