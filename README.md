@@ -2,7 +2,7 @@
 
 Pipeline end-to-end que audita la facturación de prestadores de salud (RIPS en JSON, Resolución 2275 de 2023) contra la nota técnica contractual, detecta sobrecostos y facturación atípica, y publica métricas de riesgo por prestador.
 
-> Todos los datos son **100 % sintéticos** (`generar_rips_sinteticos.py`, semilla fija). Ningún dato proviene de una EPS, IPS o persona real.
+> Todos los datos son **100 % sintéticos** (`generar_rips_sinteticos.py`). Ningún dato proviene de una EPS, IPS o persona real.
 
 ## Problema
 
