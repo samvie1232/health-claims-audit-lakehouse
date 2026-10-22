@@ -1,10 +1,12 @@
 # Healthcare Claims Audit — Databricks Lakehouse
 
+[![CI](https://github.com/samvie1232/health-claims-audit-lakehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/samvie1232/health-claims-audit-lakehouse/actions/workflows/ci.yml) ![License](https://img.shields.io/badge/license-MIT-green) ![Databricks](https://img.shields.io/badge/Databricks-Lakehouse-FF3621) ![PySpark](https://img.shields.io/badge/PySpark-4.0-E25A1C)
+
 🇪🇸 [Versión en español](README.es.md)
 
 End-to-end pipeline that audits healthcare provider billing (Colombian RIPS claims in JSON, Resolution 2275/2023) against contracted rates, flags overbilling and anomalous billing patterns, and ranks financial risk by provider and month.
 
-> All data is **100% synthetic** (`generar_rips_sinteticos.py`, fixed seed). No data comes from a real insurer, provider or person.
+> All data is **100% synthetic** (`scripts/generar_rips_sinteticos.py`, fixed seed). No data comes from a real insurer, provider or person.
 
 ## Results (12 months: Oct 2025 – Sep 2026)
 
@@ -51,8 +53,8 @@ flowchart LR
 | --- | --- | --- |
 | Setup | `00_setup` | Creates schema and volumes in Unity Catalog, generates the data |
 | Bronze | `01_bronze_ingesta` | Incremental JSON ingestion with Auto Loader + reference tables |
-| Silver | `02_silver_servicios` | Flattens invoice → patient → service, applies 5 audit rules, values each service against the contract |
-| Gold | `03_gold_prestador_mes` | Provider-month aggregates, PGP execution vs. bands, pattern alerts |
+| Silver | `02_silver_servicios` | Flattens invoice → patient → service, applies 5 audit rules, values each service against the contract (logic in `src/health_audit/silver.py`) |
+| Gold | `03_gold_prestador_mes` | Provider-month aggregates, PGP execution vs. bands, pattern alerts (logic in `src/health_audit/gold.py`) |
 
 ## Rules and alerts
 
@@ -93,6 +95,23 @@ flowchart LR
 3. Run `notebooks/00_setup` once to create the schema and generate the data.
 4. Run the `health-claims-audit-pipeline` job (or notebooks `01` → `02` → `03` in order) on Serverless compute.
 
+## Tests and CI
+
+The audit rules live in a Python package (`src/health_audit`) as pure functions over DataFrames. The notebooks only read and write tables, so **the exact same logic runs in Databricks and in local Spark**. GitHub Actions runs `ruff` and **26 pytest tests** on PySpark 4 on every push and pull request:
+
+| Test file | What it checks |
+| --- | --- |
+| `test_silver_reglas.py` | Each of the 5 rules with hand-built edge cases: the 5% overbilling tolerance boundary (105.00 vs 105.01), duplicates (only the repeat is flagged and it is not paid), dates before birth or in the future, sex-restricted diagnoses, rule priority, and that Silver flags but never drops rows. |
+| `test_gold.py` | PGP band states and excess over the upper limit; the pattern alert fires above the 1.2× threshold, not below it, and only with at least 3 months of history. |
+| `test_pipeline.py` | End to end on 12 months of synthetic data (generator → Bronze → Silver → Gold): one row per service, unique service key, recognized value never above billed value, service rules at ≥99.9% precision and ≥99.5% recall, provider-month alerts at 100%/100%, and a reproducible generator (same seed, identical files). |
+
+The tests were mutation-checked: five deliberate bugs in the rules (`>=` instead of `>` on the tolerance, paying duplicates, paying the billed instead of the contracted price, dropping the future-date check, a 1-month history for the pattern alert) each made the suite fail.
+
+```bash
+pip install -e ".[dev]"      # needs Java 17+
+ruff check . && pytest
+```
+
 ## Orchestration
 
 A Lakeflow Job chains the layers with dependencies: `bronze_ingesta` → `silver_servicios` → `gold_prestador_mes`, on Serverless compute. If a layer fails, downstream layers do not run.
@@ -101,7 +120,7 @@ A Lakeflow Job chains the layers with dependencies: `bronze_ingesta` → `silver
 
 ## Stack
 
-Databricks Free Edition · PySpark · Delta Lake · Unity Catalog · Auto Loader · Lakeflow Jobs · Databricks AI/BI Dashboards · Git Folders
+Databricks Free Edition · PySpark · Delta Lake · pytest · GitHub Actions · Unity Catalog · Auto Loader · Lakeflow Jobs · Databricks AI/BI Dashboards · Git Folders
 
 ## Roadmap
 
@@ -112,4 +131,5 @@ Databricks Free Edition · PySpark · Delta Lake · Unity Catalog · Auto Loader
 - [x] Evaluation of rules and alerts against labels
 - [x] Databricks AI/BI dashboard (`dashboards/consultas_tablero.sql`)
 - [x] Orchestration with Lakeflow Jobs
-- [ ] CI/CD with Automation Bundles and GitHub Actions
+- [x] CI with GitHub Actions: ruff + pytest on local Spark
+- [ ] CD with Databricks Asset Bundles

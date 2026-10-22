@@ -221,3 +221,8 @@ __marimo__/
 
 # Datos generados localmente (se regeneran con generar_rips_sinteticos.py)
 data/
+
+# Spark local (tests)
+spark-warehouse/
+metastore_db/
+derby.log

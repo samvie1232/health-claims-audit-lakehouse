@@ -1,10 +1,12 @@
 # Auditoría de facturación en salud — Lakehouse con Databricks
 
+[![CI](https://github.com/samvie1232/health-claims-audit-lakehouse/actions/workflows/ci.yml/badge.svg)](https://github.com/samvie1232/health-claims-audit-lakehouse/actions/workflows/ci.yml) ![License](https://img.shields.io/badge/license-MIT-green) ![Databricks](https://img.shields.io/badge/Databricks-Lakehouse-FF3621) ![PySpark](https://img.shields.io/badge/PySpark-4.0-E25A1C)
+
 🇬🇧 [English version](README.md)
 
 Pipeline end-to-end que audita la facturación de prestadores de salud (RIPS en JSON, Resolución 2275 de 2023) contra la nota técnica contractual, detecta sobrecostos y facturación atípica, y prioriza el riesgo por prestador y mes.
 
-> Todos los datos son **100 % sintéticos** (`generar_rips_sinteticos.py`, semilla fija). Ningún dato proviene de una EPS, IPS o persona real.
+> Todos los datos son **100 % sintéticos** (`scripts/generar_rips_sinteticos.py`, semilla fija). Ningún dato proviene de una EPS, IPS o persona real.
 
 ## Resultados (12 meses: oct 2025 – sep 2026)
 
@@ -93,6 +95,23 @@ flowchart LR
 3. Ejecuta una vez `notebooks/00_setup` para crear el esquema y generar los datos.
 4. Ejecuta el job `health-claims-audit-pipeline` (o los notebooks `01` → `02` → `03` en orden) sobre cómputo Serverless.
 
+## Pruebas y CI
+
+Las reglas de auditoría viven en un paquete Python (`src/health_audit`) como funciones puras sobre DataFrames. Los notebooks solo leen y escriben tablas, así que **la misma lógica corre en Databricks y en Spark local**. GitHub Actions ejecuta `ruff` y **26 tests de pytest** sobre PySpark 4 en cada push y pull request:
+
+| Archivo | Qué valida |
+| --- | --- |
+| `test_silver_reglas.py` | Cada una de las 5 reglas con casos límite hechos a mano: la frontera de la tolerancia del 5 % (105,00 vs. 105,01), duplicados (solo se marca la repetición y no se paga), fechas antes del nacimiento o futuras, diagnósticos restringidos por sexo, prioridad de reglas y que Silver marca pero nunca elimina filas. |
+| `test_gold.py` | Estados de la banda PGP y exceso sobre el límite; la alerta de patrón dispara por encima de 1,2×, no por debajo, y solo con al menos 3 meses de historia. |
+| `test_pipeline.py` | De punta a punta sobre 12 meses sintéticos (generador → Bronze → Silver → Gold): una fila por servicio, llave única, valor reconocido nunca mayor a lo facturado, reglas con precisión ≥99,9 % y recall ≥99,5 %, alertas prestador-mes al 100 %/100 % y generador reproducible (misma semilla, mismos archivos). |
+
+Los tests se validaron con *mutation testing*: cinco errores introducidos a propósito en las reglas (`>=` en vez de `>` en la tolerancia, pagar duplicados, reconocer lo facturado en vez de la tarifa, quitar el control de fechas futuras, exigir 1 mes de historia en la alerta de patrón) hicieron fallar la suite.
+
+```bash
+pip install -e ".[dev]"      # requiere Java 17+
+ruff check . && pytest
+```
+
 ## Orquestación
 
 Un Lakeflow Job encadena las capas con dependencias: `bronze_ingesta` → `silver_servicios` → `gold_prestador_mes`, sobre cómputo Serverless. Si una capa falla, las siguientes no se ejecutan.
@@ -112,4 +131,5 @@ Databricks Free Edition · PySpark · Delta Lake · Unity Catalog · Auto Loader
 - [x] Evaluación de reglas y alertas contra etiquetas
 - [x] Tablero en Databricks AI/BI (`dashboards/consultas_tablero.sql`)
 - [x] Orquestación con Lakeflow Jobs
-- [ ] CI/CD con Automation Bundles y GitHub Actions
+- [x] CI con GitHub Actions: ruff + pytest sobre Spark local
+- [ ] CD con Databricks Asset Bundles
