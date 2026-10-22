@@ -1,0 +1,33 @@
+[project]
+name = "health-audit"
+version = "1.1.0"
+description = "Healthcare claims audit rules (Silver/Gold) for the Databricks lakehouse, testable with local Spark."
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pyspark==4.0.1", "pytest>=8.0", "ruff>=0.6"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+# Los notebooks de Databricks usan spark, dbutils y display, que solo existen en el workspace
+extend-exclude = ["notebooks"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["health_audit", "conftest"]

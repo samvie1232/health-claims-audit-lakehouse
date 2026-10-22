@@ -7,7 +7,7 @@
 # MAGIC regenerar los datos con otros parámetros).
 # MAGIC
 # MAGIC **Requisito:** este notebook debe estar dentro del Git folder del repo, para que
-# MAGIC encuentre `../generar_rips_sinteticos.py`.
+# MAGIC encuentre `../scripts/generar_rips_sinteticos.py`.
 
 # COMMAND ----------
 
@@ -72,7 +72,7 @@ import subprocess
 import sys
 
 cmd = [
-    sys.executable, "../generar_rips_sinteticos.py",
+    sys.executable, "../scripts/generar_rips_sinteticos.py",
     "--salida", LANDING,
     "--meses", dbutils.widgets.get("meses"),
     "--escala", dbutils.widgets.get("escala"),

@@ -31,10 +31,16 @@ def t(nombre: str) -> str:
 
 # COMMAND ----------
 
-from pyspark.sql import Window
+# La lógica de las reglas vive en src/health_audit (probada con pytest en CI); el notebook solo lee y escribe tablas.
+import os
+import sys
+
+sys.path.insert(0, os.path.abspath("../src"))
+
 from pyspark.sql import functions as F
 
-DINERO = "decimal(18,2)"
+from health_audit import gold as G
+
 silver = spark.table(t("silver_servicios"))
 
 # COMMAND ----------
@@ -44,32 +50,7 @@ silver = spark.table(t("silver_servicios"))
 
 # COMMAND ----------
 
-conteos_hallazgos = [
-    F.sum(F.col(c).cast("int")).alias(f"n_{c.removeprefix('dq_')}")
-    for c in ["dq_duplicado", "dq_no_contratado", "dq_sobrecosto", "dq_fecha_invalida", "dq_dx_sexo_incompatible"]
-]
-
-prestador_mes = (
-    silver
-    .groupBy("periodo", "nit_prestador", "nombre_prestador", "modalidad")
-    .agg(
-        F.countDistinct("num_factura").alias("facturas"),
-        F.countDistinct("num_documento").alias("usuarios_atendidos"),
-        F.count("*").alias("servicios"),
-        F.sum("vr_servicio").cast(DINERO).alias("valor_facturado"),
-        F.sum("valor_reconocido").cast(DINERO).alias("valor_reconocido"),
-        F.sum("glosa_potencial").cast(DINERO).alias("glosa_potencial"),
-        F.sum(F.col("tiene_hallazgo").cast("int")).alias("servicios_con_hallazgo"),
-        *conteos_hallazgos,
-        # valor medio por consulta, solo servicios limpios: base para detectar cambios de patrón
-        F.avg(F.when((F.col("tipo_servicio") == "consultas") & ~F.col("tiene_hallazgo"), F.col("vr_unitario")))
-         .cast(DINERO).alias("valor_medio_consulta"),
-        F.sum(F.when((F.col("tipo_servicio") == "consultas") & ~F.col("tiene_hallazgo"), 1).otherwise(0))
-         .alias("consultas_limpias"),
-    )
-    .withColumn("pct_glosa", F.round(F.col("glosa_potencial") / F.col("valor_facturado"), 4))
-    .withColumn("pct_servicios_con_hallazgo", F.round(F.col("servicios_con_hallazgo") / F.col("servicios"), 4))
-)
+prestador_mes = G.prestador_mes(silver)
 
 prestador_mes.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(t("gold_prestador_mes"))
 display(spark.table(t("gold_prestador_mes")).orderBy("periodo", "nit_prestador"))
@@ -84,34 +65,7 @@ display(spark.table(t("gold_prestador_mes")).orderBy("periodo", "nit_prestador")
 
 # COMMAND ----------
 
-bandas = spark.table(t("bronze_ref_pgp_bandas")).select(
-    F.col("nit_prestador").cast("string").alias("nit_prestador"),
-    F.col("valor_mensual_pgp").cast(DINERO).alias("valor_mensual_pgp"),
-    F.col("limite_inferior").cast(DINERO).alias("limite_inferior"),
-    F.col("limite_superior").cast(DINERO).alias("limite_superior"),
-)
-
-ejecucion_pgp = (
-    spark.table(t("gold_prestador_mes"))
-    .where(F.col("modalidad") == "PGP")
-    .join(bandas, "nit_prestador")
-    .select(
-        "periodo", "nit_prestador", "nombre_prestador", "usuarios_atendidos",
-        F.col("valor_reconocido").alias("valor_ejecutado"),
-        "valor_mensual_pgp", "limite_inferior", "limite_superior",
-    )
-    .withColumn("pct_ejecucion", F.round(F.col("valor_ejecutado") / F.col("valor_mensual_pgp"), 4))
-    .withColumn(
-        "estado_banda",
-        F.when(F.col("valor_ejecutado") > F.col("limite_superior"), "SOBRE_LIMITE_SUPERIOR")
-         .when(F.col("valor_ejecutado") < F.col("limite_inferior"), "BAJO_LIMITE_INFERIOR")
-         .otherwise("DENTRO_DE_BANDA"),
-    )
-    .withColumn(
-        "exceso_sobre_limite",
-        F.greatest(F.col("valor_ejecutado") - F.col("limite_superior"), F.lit(0)).cast(DINERO),
-    )
-)
+ejecucion_pgp = G.ejecucion_pgp(spark.table(t("gold_prestador_mes")), spark.table(t("bronze_ref_pgp_bandas")))
 
 ejecucion_pgp.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(t("gold_ejecucion_pgp"))
 display(spark.table(t("gold_ejecucion_pgp")).orderBy("nit_prestador", "periodo"))
@@ -129,48 +83,12 @@ display(spark.table(t("gold_ejecucion_pgp")).orderBy("nit_prestador", "periodo")
 
 # COMMAND ----------
 
-historia = (
-    Window.partitionBy("nit_prestador").orderBy("periodo").rowsBetween(-MESES_HISTORIA, -1)
+alertas = G.alertas(
+    spark.table(t("gold_prestador_mes")),
+    spark.table(t("gold_ejecucion_pgp")),
+    umbral_patron=UMBRAL_PATRON,
+    meses_historia=MESES_HISTORIA,
 )
-
-patron = (
-    spark.table(t("gold_prestador_mes"))
-    .withColumn("linea_base_consulta", F.percentile_approx("valor_medio_consulta", 0.5).over(historia))
-    .withColumn("meses_en_historia", F.count("valor_medio_consulta").over(historia))
-    .withColumn("razon_vs_linea_base", F.round(F.col("valor_medio_consulta") / F.col("linea_base_consulta"), 4))
-)
-
-alertas_patron = (
-    patron
-    .where((F.col("meses_en_historia") >= 3) & (F.col("razon_vs_linea_base") > UMBRAL_PATRON))
-    .select(
-        "periodo", "nit_prestador", "nombre_prestador", "modalidad",
-        F.lit("CAMBIO_PATRON_CONSULTAS").alias("tipo_alerta"),
-        F.concat(
-            F.lit("Valor medio por consulta "), F.format_number("valor_medio_consulta", 0),
-            F.lit(" vs línea base "), F.format_number("linea_base_consulta", 0),
-            F.lit(" (×"), F.format_number("razon_vs_linea_base", 2), F.lit(")"),
-        ).alias("detalle"),
-        ((F.col("valor_medio_consulta") - F.col("linea_base_consulta")) * F.col("consultas_limpias"))
-         .cast(DINERO).alias("valor_en_riesgo"),
-    )
-)
-
-alertas_pgp = (
-    spark.table(t("gold_ejecucion_pgp"))
-    .where(F.col("estado_banda") == "SOBRE_LIMITE_SUPERIOR")
-    .select(
-        "periodo", "nit_prestador", "nombre_prestador", F.lit("PGP").alias("modalidad"),
-        F.lit("SOBREEJECUCION_PGP").alias("tipo_alerta"),
-        F.concat(
-            F.lit("Ejecución al "), F.format_number(F.col("pct_ejecucion") * 100, 1),
-            F.lit(" % del valor pactado (límite 110 %)"),
-        ).alias("detalle"),
-        F.col("exceso_sobre_limite").alias("valor_en_riesgo"),
-    )
-)
-
-alertas = alertas_pgp.unionByName(alertas_patron)
 alertas.write.mode("overwrite").option("overwriteSchema", "true").saveAsTable(t("gold_alertas"))
 display(spark.table(t("gold_alertas")).orderBy(F.desc("valor_en_riesgo")))
 
@@ -181,31 +99,4 @@ display(spark.table(t("gold_alertas")).orderBy(F.desc("valor_en_riesgo")))
 
 # COMMAND ----------
 
-EQUIVALENCIA = {"SOBREEJECUCION_PGP": "SOBREEJECUCION_PGP", "UPCODING_PATRON": "CAMBIO_PATRON_CONSULTAS"}
-mapa = F.create_map(*[F.lit(x) for par in EQUIVALENCIA.items() for x in par])
-
-etiquetas = (
-    spark.table(t("eval_anomalias_prestador_mes"))
-    .select(
-        F.col("nit_prestador").cast("string").alias("nit_prestador"),
-        F.col("periodo").cast("string").alias("periodo"),
-        mapa[F.col("tipo_anomalia")].alias("tipo_alerta"),
-        F.lit(True).alias("sembrada"),
-    )
-)
-detectadas = spark.table(t("gold_alertas")).select("nit_prestador", "periodo", "tipo_alerta", F.lit(True).alias("alertada"))
-
-evaluacion = etiquetas.join(detectadas, ["nit_prestador", "periodo", "tipo_alerta"], "full_outer")
-
-display(
-    evaluacion
-    .groupBy("tipo_alerta")
-    .agg(
-        F.sum(F.col("sembrada").isNotNull().cast("int")).alias("sembradas"),
-        F.sum(F.col("alertada").isNotNull().cast("int")).alias("alertas"),
-        F.sum((F.col("sembrada").isNotNull() & F.col("alertada").isNotNull()).cast("int")).alias("aciertos"),
-    )
-    .withColumn("precision", F.round(F.col("aciertos") / F.col("alertas"), 4))
-    .withColumn("recall", F.round(F.col("aciertos") / F.col("sembradas"), 4))
-    .orderBy("tipo_alerta")
-)
+display(G.evaluar_alertas(spark.table(t("gold_alertas")), spark.table(t("eval_anomalias_prestador_mes"))))

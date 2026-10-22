@@ -12,7 +12,9 @@ necesita una EPS para valorizar y auditar la facturación:
     data/ref/nota_tecnica.csv                    -> tarifas pactadas por prestador y tecnología
     data/ref/pgp_bandas.csv                      -> valor mensual y bandas de los contratos PGP
     data/ref/catalogo_cups.csv / catalogo_cie10.csv / catalogo_medicamentos.csv
-    data/labels/anomalias_sembradas.csv          -> "verdad de terreno" para medir tu detector
+    data/labels/anomalias_sembradas.csv          -> "verdad de terreno" por servicio (reglas de Silver)
+    data/labels/anomalias_prestador_mes.csv      -> "verdad de terreno" por prestador-mes (análisis de Gold):
+                                                    sobreejecución PGP y patrón de upcoding
 
 NINGÚN dato viene de una base real: prestadores, NIT, documentos, fechas y
 valores se inventan con una semilla fija, así que cualquiera puede reproducir
@@ -186,13 +188,16 @@ def construir_nota_tecnica(rng: random.Random) -> list[dict]:
     return filas
 
 
-def construir_bandas_pgp(nota: list[dict]) -> list[dict]:
+def construir_bandas_pgp(rng: random.Random, valor_mes: dict, sobreejecucion: set) -> list[dict]:
+    """El valor PGP pactado se calibra con el comportamiento normal del prestador
+    (mediana de sus meses sin sobreejecución), como haría una EPS al negociar con historia."""
     bandas = []
     for nit, _, _, modalidad in PRESTADORES:
         if modalidad != "PGP":
             continue
-        valor = sum(f["valor_unitario_nt"] * f["frecuencia_mensual_esperada"]
-                    for f in nota if f["nit_prestador"] == nit)
+        normales = sorted(v for (n, p), v in valor_mes.items() if n == nit and (n, p) not in sobreejecucion)
+        mediana = normales[len(normales) // 2]
+        valor = mediana * rng.uniform(0.99, 1.01)
         bandas.append({
             "nit_prestador": nit,
             "valor_mensual_pgp": round(valor, -3),
@@ -200,6 +205,19 @@ def construir_bandas_pgp(nota: list[dict]) -> list[dict]:
             "limite_superior": round(valor * 1.1, -3),
         })
     return bandas
+
+
+def elegir_prestador_upcoding(nota: list[dict]) -> str:
+    """Prestador por evento con mayor brecha entre su consulta más cara y la más barata."""
+    brechas = {}
+    for nit, _, _, modalidad in PRESTADORES:
+        if modalidad != "EVENTO":
+            continue
+        valores = [f["valor_unitario_nt"] for f in nota
+                   if f["nit_prestador"] == nit and f["tipo_tecnologia"] == "consultas"]
+        if len(valores) >= 2:
+            brechas[nit] = max(valores) / min(valores)
+    return max(brechas, key=brechas.get)
 
 
 # ---------------------------------------------------------------------------
@@ -215,11 +233,15 @@ class Generador:
             self.nt.setdefault(f["nit_prestador"], {}).setdefault(f["tipo_tecnologia"], []).append(f)
         self.etiquetas: list[dict] = []
         self.ultimo_servicio: dict | None = None  # para sembrar duplicados
+        self.upcoding = False  # prestador-mes con patrón de consultas infladas
 
     # -- servicios -----------------------------------------------------------
     def _elegir(self, nit: str, tipo: str) -> tuple[dict, str | None]:
         """Devuelve (fila de NT o tecnología fuera de NT, anomalía sembrada)."""
         contratadas = self.nt[nit].get(tipo, [])
+        if tipo == "consultas" and self.upcoding and self.rng.random() < 0.6:
+            # cada consulta cobra la tarifa correcta: solo el patrón agregado es anómalo
+            return max(contratadas, key=lambda f: f["valor_unitario_nt"]), None
         if self.rng.random() < self.tasa / len(TIPOS_ANOMALIA):
             codigos = {f["codigo"] for f in contratadas}
             if tipo == "medicamentos":
@@ -392,22 +414,38 @@ def main() -> None:
     # población afiliada por municipio (se reutiliza mes a mes, como en la vida real)
     poblacion = {m: [nuevo_usuario(rng, m, hoy) for _ in range(int(800 * args.escala))] for m in MUNICIPIOS}
 
+    meses = [(anio0 + (mes0 - 1 + k) // 12, (mes0 - 1 + k) % 12 + 1) for k in range(args.meses)]
+    periodos = [f"{a}{m:02d}" for a, m in meses]
+
+    # anomalías a nivel prestador-mes (invisibles fila por fila)
+    nits_pgp = [n for n, _, _, mod in PRESTADORES if mod == "PGP"]
+    candidatos = [(n, p) for n in nits_pgp for p in periodos[3:]]  # deja historia antes de sembrar
+    sobreejecucion = set(rng.sample(candidatos, k=min(3, len(candidatos))))
+    nit_upcoding = elegir_prestador_upcoding(nota)
+    upcoding = {(nit_upcoding, p) for p in periodos[-3:]} if len(periodos) >= 6 else set()
+    etiquetas_pm = (
+        [{"nit_prestador": n, "periodo": p, "tipo_anomalia": "SOBREEJECUCION_PGP"} for n, p in sorted(sobreejecucion)]
+        + [{"nit_prestador": n, "periodo": p, "tipo_anomalia": "UPCODING_PATRON"} for n, p in sorted(upcoding)]
+    )
+
+    valor_mes: dict[tuple[str, str], float] = {}
     total_facturas = total_servicios = 0
     contador = 0
-    for k in range(args.meses):
-        anio, mes = anio0 + (mes0 - 1 + k) // 12, (mes0 - 1 + k) % 12 + 1
-        carpeta = salida / "raw" / "rips" / f"{anio}{mes:02d}"
+    for (anio, mes), periodo in zip(meses, periodos, strict=True):
+        carpeta = salida / "raw" / "rips" / periodo
         carpeta.mkdir(parents=True, exist_ok=True)
         for nit, _, municipio, modalidad in PRESTADORES:
             pob = poblacion[municipio]
+            gen.upcoding = (nit, periodo) in upcoding
             if modalidad == "EVENTO":
                 # una factura por atención
                 n_fact = int(rng.randint(40, 90) * args.escala)
                 lotes = [[rng.choice(pob)] for _ in range(n_fact)]
                 rango = (1, 4)
             else:
-                # PGP / cápita: facturas mensuales por lotes de usuarios
-                n_usuarios = int(rng.randint(150, 300) * args.escala)
+                # PGP / cápita: facturas mensuales por lotes de usuarios, volumen estable
+                base = rng.gauss(225, 4) * (1.4 if (nit, periodo) in sobreejecucion else 1.0)
+                n_usuarios = int(base * args.escala)
                 elegidos = rng.sample(pob, k=min(n_usuarios, len(pob)))
                 lotes = [elegidos[i:i + 50] for i in range(0, len(elegidos), 50)]
                 rango = (1, 3)
@@ -415,16 +453,19 @@ def main() -> None:
                 contador += 1
                 num = f"FE{contador:07d}"
                 rips = gen.factura(nit, num, lote, anio, mes, rango)
-                total_servicios += sum(len(v) for u in rips["usuarios"] for v in u["servicios"].values())
+                regs = [s for u in rips["usuarios"] for v in u["servicios"].values() for s in v]
+                total_servicios += len(regs)
+                valor_mes[(nit, periodo)] = valor_mes.get((nit, periodo), 0) + sum(s["vrServicio"] for s in regs)
                 (carpeta / f"{nit}_{num}.json").write_text(
                     json.dumps(rips, ensure_ascii=False, indent=2), encoding="utf-8")
                 total_facturas += 1
+    gen.upcoding = False
 
     escribir_csv(salida / "ref" / "prestadores.csv",
                  [{"nit_prestador": n, "nombre": nom, "cod_municipio": m,
                    "municipio": MUNICIPIOS[m], "modalidad": mod} for n, nom, m, mod in PRESTADORES])
     escribir_csv(salida / "ref" / "nota_tecnica.csv", nota)
-    escribir_csv(salida / "ref" / "pgp_bandas.csv", construir_bandas_pgp(nota))
+    escribir_csv(salida / "ref" / "pgp_bandas.csv", construir_bandas_pgp(rng, valor_mes, sobreejecucion))
     escribir_csv(salida / "ref" / "catalogo_cups.csv",
                  [{"codigo": c, "descripcion": d, "tipo_servicio": t} for c, d, t, _ in CUPS])
     escribir_csv(salida / "ref" / "catalogo_cie10.csv",
@@ -432,10 +473,12 @@ def main() -> None:
     escribir_csv(salida / "ref" / "catalogo_medicamentos.csv",
                  [{"codigo": c, "nombre": n, "forma": f, "concentracion": k} for c, n, f, k, _ in MEDICAMENTOS])
     escribir_csv(salida / "labels" / "anomalias_sembradas.csv", gen.etiquetas)
+    escribir_csv(salida / "labels" / "anomalias_prestador_mes.csv", etiquetas_pm)
 
     print(f"Facturas: {total_facturas:,} | servicios: {total_servicios:,} | "
           f"anomalías sembradas: {len(gen.etiquetas):,} "
-          f"({len(gen.etiquetas) / max(total_servicios, 1):.1%})")
+          f"({len(gen.etiquetas) / max(total_servicios, 1):.1%}) | "
+          f"anomalías prestador-mes: {len(etiquetas_pm)}")
     print(f"Salida en: {salida.resolve()}")
 
 
